@@ -12,6 +12,7 @@ import {
   Pause,
   SendHorizontal,
   Github,
+  UserPlus
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import ThemeToggle from '@/components/ThemeToggle'
@@ -576,6 +577,9 @@ export default function Home() {
           <div className="ml-3 font-bold leading-10 max-sm:leading-8">{t('title')}</div>
         </div>
         <div className="flex items-center gap-1">
+          <Button title={t('Join Membership')} variant="ghost" size="icon" className="h-8 w-8">
+            <UserPlus className="h-5 w-5" onClick={() => window.open('https://openai.mom/join-membership')} />
+          </Button>
           <Button title={t('github')} variant="ghost" size="icon" className="h-8 w-8">
             <Github className="h-5 w-5" onClick={() => window.open('https://github.com/Amery2010/TalkWithGemini')} />
           </Button>
