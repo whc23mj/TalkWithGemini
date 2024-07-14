@@ -1,22 +1,28 @@
+'use client'
 import { useEffect, useState, useCallback, useMemo, memo } from 'react'
+import { useTranslation } from 'react-i18next'
+import Lightbox from 'yet-another-react-lightbox'
+import LightboxFullscreen from 'yet-another-react-lightbox/plugins/fullscreen'
 import MarkdownIt from 'markdown-it'
 import markdownHighlight from 'markdown-it-highlightjs'
 import highlight from 'highlight.js'
 import markdownKatex from '@traptitech/markdown-it-katex'
 import Clipboard from 'clipboard'
-import { useTranslation } from 'react-i18next'
-import { User, Bot, RotateCw, Sparkles, Copy, CopyCheck, PencilLine, Eraser, Volume2 } from 'lucide-react'
+import { User, Bot, RotateCw, Sparkles, Copy, CopyCheck, PencilLine, Eraser, Volume2, Eye } from 'lucide-react'
 import { EdgeSpeech } from '@xiangfa/polly'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import BubblesLoading from '@/components/BubblesLoading'
 import FileList from '@/components/FileList'
 import EditableArea from '@/components/EditableArea'
+import AudioPlayer from '@/components/AudioPlayer'
 import IconButton from '@/components/IconButton'
 import { useMessageStore } from '@/store/chat'
 import { useSettingStore } from '@/store/setting'
 import AudioStream from '@/utils/AudioStream'
 import { sentenceSegmentation } from '@/utils/common'
 import { upperFirst, isFunction, find } from 'lodash-es'
+
+import 'yet-another-react-lightbox/styles.css'
 
 interface Props extends Message {
   onRegenerate?: (id: string) => void
@@ -65,11 +71,40 @@ function mergeSentences(sentences: string[], sentenceLength = 20): string[] {
 function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
   const { t } = useTranslation()
   const [html, setHtml] = useState<string>('')
+  const [hasTextContent, setHasTextContent] = useState<boolean>(false)
   const [isEditing, setIsEditing] = useState<boolean>(false)
   const [isCopyed, setIsCopyed] = useState<boolean>(false)
+  const [showLightbox, setShowLightbox] = useState<boolean>(false)
+  const [lightboxIndex, setLightboxIndex] = useState<number>(0)
   const fileList = useMemo(() => {
     return attachments ? attachments.filter((item) => !item.metadata?.mimeType.startsWith('image/')) : []
   }, [attachments])
+  const inlineImageList = useMemo(() => {
+    const imageList: string[] = []
+    parts.forEach(async (part) => {
+      if (part.inlineData?.mimeType.startsWith('image/')) {
+        imageList.push(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`)
+      } else if (part.fileData && attachments) {
+        for (const attachment of attachments) {
+          if (attachment.metadata?.uri === part.fileData.fileUri) {
+            if (part.fileData?.mimeType.startsWith('image/') && attachment.preview) {
+              imageList.push(attachment.preview)
+            }
+          }
+        }
+      }
+    })
+    return imageList
+  }, [parts, attachments])
+  const inlineAudioList = useMemo(() => {
+    const audioList: string[] = []
+    parts.forEach(async (part) => {
+      if (part.inlineData?.mimeType.startsWith('audio/')) {
+        audioList.push(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`)
+      }
+    })
+    return audioList
+  }, [parts])
   const content = useMemo(() => {
     let text = ''
     parts.forEach((item) => {
@@ -133,6 +168,11 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
     }
   }, [content])
 
+  const openLightbox = useCallback((index: number) => {
+    setLightboxIndex(index)
+    setShowLightbox(true)
+  }, [])
+
   const render = useCallback(
     (content: string) => {
       const md: MarkdownIt = MarkdownIt({
@@ -141,6 +181,24 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
       })
         .use(markdownHighlight)
         .use(markdownKatex)
+
+      // Save the original text rule
+      const defaultTextRules = md.renderer.rules.text!
+
+      // Rewrite the `strong` rule to adapt to Gemini generation grammar
+      md.renderer.rules.text = (tokens, idx, options, env, self) => {
+        const token = tokens[idx]
+        const content = token.content
+
+        // Check whether it conforms to the `strong` format
+        const match = content.match(/^\*\*(.+?)\*\*(.+)/)
+        if (match) {
+          return `<b>${match[1]}</b>${match[2]}`
+        }
+
+        // If the format is not met, the original `strong` rule is called
+        return defaultTextRules(tokens, idx, options, env, self)
+      }
 
       const mathLineRender = md.renderer.rules.math_inline!
       md.renderer.rules.math_inline = (...params) => {
@@ -195,18 +253,7 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
     parts.forEach(async (part) => {
       if (part.text) {
         messageParts.push(render(part.text))
-      } else if (part.inlineData?.mimeType.startsWith('image/')) {
-        messageParts.push(
-          `<img class="inline-image" alt="inline-image" src="data:${part.inlineData.mimeType};base64,${part.inlineData.data}" />`,
-        )
-      } else if (part.fileData && attachments) {
-        for (const attachment of attachments) {
-          if (attachment.metadata?.uri === part.fileData.fileUri) {
-            if (part.fileData?.mimeType.startsWith('image/')) {
-              messageParts.push(`<img class="inline-image" alt="inline-image" src="${attachment.preview}" />`)
-            }
-          }
-        }
+        setHasTextContent(true)
       }
     })
     setHtml(messageParts.join(''))
@@ -244,8 +291,30 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
       ) : (
         <div className="group relative flex-auto">
           {fileList.length > 0 ? (
-            <div className="w-full border-b border-dashed pb-2">
+            <div className="not:last:border-dashed not:last:border-b w-full pb-2">
               <FileList fileList={fileList} />
+            </div>
+          ) : null}
+          {inlineAudioList.length > 0 ? (
+            <div className="not:last:border-dashed not:last:border-b flex w-full flex-wrap pb-2">
+              {inlineAudioList.map((audio, idx) => {
+                return <AudioPlayer key={idx} className="mb-2" src={audio} />
+              })}
+            </div>
+          ) : null}
+          {inlineImageList.length > 0 ? (
+            <div className="flex flex-wrap gap-2 pb-2">
+              {inlineImageList.map((image, idx) => {
+                return (
+                  <div key={idx} className="group/image relative cursor-pointer" onClick={() => openLightbox(idx)}>
+                    {
+                      // eslint-disable-next-line
+                      <img className="max-h-48 rounded-sm" src={image} alt="inline-image" />
+                    }
+                    <Eye className="absolute left-1/2 top-1/2 -ml-4 -mt-4 h-8 w-8 text-white/80 opacity-0 group-hover/image:opacity-100" />
+                  </div>
+                )
+              })}
             </div>
           ) : null}
           {!isEditing ? (
@@ -271,12 +340,16 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
                     </IconButton>
                   </>
                 ) : null}
-                <IconButton title={t('copy')} className={`copy-${id}`} onClick={() => handleCopy()}>
-                  {isCopyed ? <CopyCheck className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                </IconButton>
-                <IconButton title={t('speak')} onClick={() => handleSpeak()}>
-                  <Volume2 className="h-4 w-4" />
-                </IconButton>
+                {hasTextContent ? (
+                  <>
+                    <IconButton title={t('copy')} className={`copy-${id}`} onClick={() => handleCopy()}>
+                      {isCopyed ? <CopyCheck className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    </IconButton>
+                    <IconButton title={t('speak')} onClick={() => handleSpeak()}>
+                      <Volume2 className="h-4 w-4" />
+                    </IconButton>
+                  </>
+                ) : null}
               </div>
             </>
           ) : (
@@ -289,6 +362,13 @@ function MessageItem({ id, role, parts, attachments, onRegenerate }: Props) {
           )}
         </div>
       )}
+      <Lightbox
+        open={showLightbox}
+        close={() => setShowLightbox(false)}
+        slides={inlineImageList.map((item) => ({ src: item }))}
+        index={lightboxIndex}
+        plugins={[LightboxFullscreen]}
+      />
     </>
   )
 }

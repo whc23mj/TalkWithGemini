@@ -1,7 +1,7 @@
 'use client'
 import dynamic from 'next/dynamic'
-import { useRef, useState, useMemo, KeyboardEvent, useEffect, useCallback, useLayoutEffect } from 'react'
-import { EdgeSpeech, SpeechRecognition } from '@xiangfa/polly'
+import { useRef, useState, useMemo, KeyboardEvent, useEffect, useCallback } from 'react'
+import { EdgeSpeech, getRecordMineType } from '@xiangfa/polly'
 import SiriWave from 'siriwave'
 import {
   MessageCircleHeart,
@@ -26,19 +26,20 @@ import { useMessageStore } from '@/store/chat'
 import { useAttachmentStore } from '@/store/attachment'
 import { useSettingStore } from '@/store/setting'
 import chat, { type RequestProps } from '@/utils/chat'
-import { summarizePrompt, getVoiceModelPrompt, getSummaryPrompt } from '@/utils/prompt'
+import { summarizePrompt, getVoiceModelPrompt, getSummaryPrompt, getTalkAudioPrompt } from '@/utils/prompt'
+import { AudioRecorder } from '@/utils/Recorder'
 import AudioStream from '@/utils/AudioStream'
 import PromiseQueue from '@/utils/PromiseQueue'
 import textStream, { streamToText } from '@/utils/textStream'
 import { encodeToken } from '@/utils/signature'
 import type { FileManagerOptions } from '@/utils/FileManager'
 import { fileUpload, imageUpload } from '@/utils/upload'
-import { formatTime } from '@/utils/common'
+import { formatTime, readFileAsDataURL } from '@/utils/common'
 import { cn } from '@/utils'
 import { Model, OldVisionModel, OldTextModel } from '@/constant/model'
 import mimeType from '@/constant/attachment'
 import { customAlphabet } from 'nanoid'
-import { isFunction, findIndex, pick } from 'lodash-es'
+import { isFunction, findIndex, pick, isUndefined } from 'lodash-es'
 
 interface AnswerParams {
   messages: Message[]
@@ -47,7 +48,7 @@ interface AnswerParams {
   onError?: (error: string, code?: number) => void
 }
 
-const buildMode = process.env.NEXT_PUBLIC_BUILD_MODE as string
+const BUILD_MODE = process.env.NEXT_PUBLIC_BUILD_MODE as string
 const nanoid = customAlphabet('1234567890abcdefghijklmnopqrstuvwxyz', 8)
 
 const AssistantRecommend = dynamic(() => import('@/components/AssistantRecommend'))
@@ -60,7 +61,7 @@ export default function Home() {
   const scrollAreaBottomRef = useRef<HTMLDivElement>(null)
   const audioStreamRef = useRef<AudioStream>()
   const edgeSpeechRef = useRef<EdgeSpeech>()
-  const speechRecognitionRef = useRef<SpeechRecognition>()
+  const audioRecordRef = useRef<AudioRecorder>()
   const speechQueue = useRef<PromiseQueue>()
   const messagesRef = useRef(useMessageStore.getState().messages)
   const messageStore = useMessageStore()
@@ -71,12 +72,10 @@ export default function Home() {
   const [content, setContent] = useState<string>('')
   const [subtitle, setSubtitle] = useState<string>('')
   const [errorMessage, setErrorMessage] = useState<string>('')
-  const [isRecording, setIsRecording] = useState<boolean>(false)
-  const [recordTimer, setRecordTimer] = useState<NodeJS.Timeout>()
   const [recordTime, setRecordTime] = useState<number>(0)
   const [settingOpen, setSetingOpen] = useState<boolean>(false)
   const [speechSilence, setSpeechSilence] = useState<boolean>(false)
-  const [disableSpeechRecognition, setDisableSpeechRecognition] = useState<boolean>(false)
+  const [isRecording, setIsRecording] = useState<boolean>(false)
   const [status, setStatus] = useState<'thinkng' | 'silence' | 'talking'>('silence')
   const statusText = useMemo(() => {
     switch (status) {
@@ -93,6 +92,9 @@ export default function Home() {
   }, [settingStore.model])
   const supportAttachment = useMemo(() => {
     return !OldTextModel.includes(settingStore.model as Model)
+  }, [settingStore.model])
+  const supportSpeechRecognition = useMemo(() => {
+    return !OldTextModel.includes(settingStore.model as Model) && !OldVisionModel.includes(settingStore.model as Model)
   }, [settingStore.model])
   const isUploading = useMemo(() => {
     for (const file of attachmentStore.files) {
@@ -275,6 +277,9 @@ export default function Home() {
           }
         },
         onFinish: async () => {
+          if (talkMode === 'voice') {
+            setStatus('silence')
+          }
           scrollToBottom()
           saveMessage()
           if (maxHistoryLength > 0) {
@@ -297,11 +302,12 @@ export default function Home() {
 
   const handleSubmit = useCallback(
     async (text: string): Promise<void> => {
-      if (content === '') return Promise.reject(false)
+      if (text === '') return Promise.reject(false)
       const { talkMode, model } = useSettingStore.getState()
       const { files, clear: clearAttachment } = useAttachmentStore.getState()
       const { summary, add: addMessage } = useMessageStore.getState()
       const messagePart: Message['parts'] = []
+      let talkAudioMode: boolean = false
       if (files.length > 0) {
         for (const file of files) {
           if (isOldVisionModel) {
@@ -325,7 +331,18 @@ export default function Home() {
           }
         }
       }
-      messagePart.push({ text })
+      if (text.startsWith('data:audio/webm;base64,') || text.startsWith('data:audio/mp4;base64,')) {
+        const audioData = text.substring(5).split(';base64,')
+        messagePart.push({
+          inlineData: {
+            mimeType: audioData[0],
+            data: audioData[1],
+          },
+        })
+        talkAudioMode = true
+      } else {
+        messagePart.push({ text })
+      }
       const newUserMessage: Message = {
         id: nanoid(),
         role: 'user',
@@ -336,14 +353,17 @@ export default function Home() {
       const newModelMessage: Message = { id: nanoid(), role: 'model', parts: [{ text: '' }] }
       addMessage(newModelMessage)
       let messages: Message[] = [...messagesRef.current.slice(0, -1)]
-      if (summary.content !== '') {
-        const newMessages = messages.filter((item) => !summary.ids.includes(item.id))
-        messages = [...getSummaryPrompt(summary.content), ...newMessages]
+      if (talkAudioMode) {
+        messages = getTalkAudioPrompt(messages)
       }
       if (talkMode === 'voice') {
         messages = getVoiceModelPrompt(messages)
         setStatus('thinkng')
         setSubtitle('')
+      }
+      if (summary.content !== '') {
+        const newMessages = messages.filter((item) => !summary.ids.includes(item.id))
+        messages = [...getSummaryPrompt(summary.content), ...newMessages]
       }
       setContent('')
       clearAttachment()
@@ -359,7 +379,7 @@ export default function Home() {
         },
       })
     },
-    [content, isOldVisionModel, fetchAnswer, handleResponse, handleError],
+    [isOldVisionModel, fetchAnswer, handleResponse, handleError],
   )
 
   const handleResubmit = useCallback(
@@ -407,7 +427,7 @@ export default function Home() {
   const checkAccessStatus = useCallback(() => {
     const { isProtected, password, apiKey } = useSettingStore.getState()
     const isProtectedMode = isProtected && password === '' && apiKey === ''
-    const isStaticMode = buildMode === 'export' && apiKey === ''
+    const isStaticMode = BUILD_MODE === 'export' && apiKey === ''
     if (isProtectedMode || isStaticMode) {
       setSetingOpen(true)
       return false
@@ -416,39 +436,37 @@ export default function Home() {
     }
   }, [])
 
-  const startRecordTime = useCallback(() => {
-    const intervalTimer = setInterval(() => {
-      setRecordTime((time) => time + 1)
-    }, 1000)
-    setRecordTimer(intervalTimer)
-  }, [])
-
-  const endRecordTimer = useCallback(() => {
-    clearInterval(recordTimer)
-  }, [recordTimer])
-
   const handleRecorder = useCallback(() => {
     if (!checkAccessStatus()) return false
     if (!audioStreamRef.current) {
       audioStreamRef.current = new AudioStream()
     }
-    if (speechRecognitionRef.current) {
-      const { talkMode } = useSettingStore.getState()
-      if (isRecording) {
-        speechRecognitionRef.current.stop()
-        endRecordTimer()
-        setRecordTime(0)
-        if (talkMode === 'voice') {
-          handleSubmit(speechRecognitionRef.current.text)
-        }
-        setIsRecording(false)
+    if (!audioRecordRef.current || audioRecordRef.current.autoStop !== settingStore.autoStopRecord) {
+      audioRecordRef.current = new AudioRecorder({
+        autoStop: settingStore.autoStopRecord,
+        onStart: () => {
+          setIsRecording(true)
+        },
+        onTimeUpdate: (time) => {
+          setRecordTime(time)
+        },
+        onFinish: async (audioData) => {
+          const recordType = getRecordMineType()
+          const file = new File([audioData], `${Date.now()}.${recordType.extension}`, { type: recordType.mineType })
+          const recordDataURL = await readFileAsDataURL(file)
+          handleSubmit(recordDataURL)
+          setIsRecording(false)
+        },
+      })
+      audioRecordRef.current.start()
+    } else {
+      if (audioRecordRef.current.isRecording) {
+        audioRecordRef.current.stop()
       } else {
-        speechRecognitionRef.current.start()
-        setIsRecording(true)
-        startRecordTime()
+        audioRecordRef.current.start()
       }
     }
-  }, [checkAccessStatus, handleSubmit, startRecordTime, endRecordTimer, isRecording])
+  }, [settingStore.autoStopRecord, checkAccessStatus, handleSubmit])
 
   const handleStopTalking = useCallback(() => {
     setSpeechSilence(true)
@@ -466,7 +484,7 @@ export default function Home() {
         handleSubmit(content)
       }
     },
-    [content, isRecording, handleSubmit, checkAccessStatus],
+    [content, handleSubmit, checkAccessStatus, isRecording],
   )
 
   const handleFileUpload = useCallback(
@@ -529,20 +547,6 @@ export default function Home() {
   }, [messagesRef.current.length, scrollToBottom])
 
   useEffect(() => {
-    try {
-      speechRecognitionRef.current = new SpeechRecognition({
-        locale: settingStore.sttLang,
-        onUpdate: (text) => {
-          setContent(text)
-        },
-      })
-    } catch (err) {
-      console.error(err)
-      setDisableSpeechRecognition(true)
-    }
-  }, [settingStore.sttLang])
-
-  useEffect(() => {
     const setting = useSettingStore.getState()
     if (setting.ttsLang !== '') {
       const edgeSpeech = new EdgeSpeech({ locale: setting.ttsLang })
@@ -554,18 +558,25 @@ export default function Home() {
     }
   }, [settingStore.ttsLang])
 
-  useLayoutEffect(() => {
-    const instance = new SiriWave({
-      container: siriWaveRef.current!,
-      style: 'ios9',
-      speed: 0.04,
-      amplitude: 0.1,
-      width: window.innerWidth,
-      height: window.innerHeight / 5,
-    })
-    setSiriWave(instance)
+  useEffect(() => {
+    const { talkMode } = useSettingStore.getState()
+    let instance: SiriWave
+    if (talkMode === 'chat') {
+      instance = new SiriWave({
+        container: siriWaveRef.current!,
+        style: 'ios9',
+        speed: 0.04,
+        amplitude: 0.1,
+        width: window.innerWidth,
+        height: window.innerHeight / 5,
+      })
+      setSiriWave(instance)
+    }
+
     return () => {
-      instance.dispose()
+      if (talkMode === 'chat' && instance) {
+        instance.dispose()
+      }
     }
   }, [])
 
@@ -581,7 +592,9 @@ export default function Home() {
             <UserPlus className="h-5 w-5" onClick={() => window.open('https://openai.mom/join-membership')} />
           </Button>
           <Button title={t('github')} variant="ghost" size="icon" className="h-8 w-8">
-            <Github className="h-5 w-5" onClick={() => window.open('https://github.com/Amery2010/TalkWithGemini')} />
+            <a href="https://github.com/Amery2010/TalkWithGemini" target="_blank">
+              <Github className="h-5 w-5" />
+            </a>
           </Button>
           <ThemeToggle />
           <Button
@@ -642,8 +655,8 @@ export default function Home() {
         </div>
       )}
       <div ref={scrollAreaBottomRef}></div>
-      <div className="fixed bottom-0 flex w-full max-w-screen-md items-end gap-2 p-4 pb-8 max-sm:p-2 max-sm:pb-3 landscape:max-md:pb-4">
-        {!disableSpeechRecognition ? (
+      <div className="fixed bottom-0 flex w-full max-w-screen-md items-end gap-2 bg-background p-4 pb-8 max-sm:p-2 max-sm:pb-3 landscape:max-md:pb-4">
+        {supportSpeechRecognition ? (
           <Button title={t('voiceMode')} variant="secondary" size="icon" onClick={() => updateTalkMode('voice')}>
             <AudioLines />
           </Button>
@@ -659,7 +672,7 @@ export default function Home() {
             autoFocus
             className={cn(
               'h-auto max-h-[120px] w-full resize-none border-none bg-transparent px-2 text-sm leading-6 transition-[height] focus-visible:outline-none',
-              disableSpeechRecognition ? 'pr-9' : 'pr-[72px]',
+              !supportSpeechRecognition ? 'pr-9' : 'pr-[72px]',
             )}
             style={{ height: textareaHeight > 24 ? `${textareaHeight}px` : 'auto' }}
             value={content}
@@ -686,7 +699,7 @@ export default function Home() {
                 </Tooltip>
               </TooltipProvider>
             ) : null}
-            {!disableSpeechRecognition ? (
+            {supportSpeechRecognition ? (
               <TooltipProvider>
                 <Tooltip open={isRecording}>
                   <TooltipTrigger asChild>
@@ -697,8 +710,13 @@ export default function Home() {
                       <Mic className={isRecording ? 'animate-pulse' : ''} />
                     </div>
                   </TooltipTrigger>
-                  <TooltipContent className="mb-1 px-2 py-1 text-center font-mono text-red-500">
-                    {formatTime(recordTime)}
+                  <TooltipContent
+                    className={cn(
+                      'mb-1 px-2 py-1 text-center',
+                      isUndefined(audioRecordRef.current?.isRecording) ? '' : 'font-mono text-red-500',
+                    )}
+                  >
+                    {isUndefined(audioRecordRef.current?.isRecording) ? t('startRecording') : formatTime(recordTime)}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -774,7 +792,7 @@ export default function Home() {
           </div>
         </div>
       </div>
-      <Setting open={settingOpen} hiddenTalkPanel={disableSpeechRecognition} onClose={() => setSetingOpen(false)} />
+      <Setting open={settingOpen} hiddenTalkPanel={!supportSpeechRecognition} onClose={() => setSetingOpen(false)} />
     </main>
   )
 }

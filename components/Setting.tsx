@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Switch } from '@/components/ui/switch'
 import ResponsiveDialog from '@/components/ResponsiveDialog'
 import i18n from '@/plugins/i18n'
 import locales from '@/constant/locales'
@@ -44,7 +45,8 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
   const [topK, setTopK] = useState<number>(64)
   const [temperature, setTemperature] = useState<number>(1)
   const [maxOutputTokens, setMaxOutputTokens] = useState<number>(8192)
-  const [safety, setSafety] = useState<string>('low')
+  const [safety, setSafety] = useState<string>('none')
+  const [autoStopRecord, setAutoStopRecord] = useState<boolean>(false)
   const isProtected = useMemo(() => {
     return settingStore.isProtected
   }, [settingStore.isProtected])
@@ -103,6 +105,7 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
     if (temperature !== settingStore.temperature) settingStore.setTemperature(temperature)
     if (maxOutputTokens !== settingStore.maxOutputTokens) settingStore.setMaxOutputTokens(maxOutputTokens)
     if (safety !== settingStore.safety) settingStore.setSafety(safety)
+    if (autoStopRecord !== settingStore.autoStopRecord) settingStore.setAutoStopRecord(autoStopRecord)
     onClose()
   }
 
@@ -149,6 +152,7 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
     setTemperature(settingStore.temperature)
     setMaxOutputTokens(settingStore.maxOutputTokens)
     setSafety(settingStore.safety)
+    setAutoStopRecord(settingStore.autoStopRecord)
   }, [settingStore])
 
   return (
@@ -164,11 +168,17 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
       }
     >
       <Tabs className="max-sm:px-4" defaultValue="general">
-        <TabsList className="mx-auto grid w-full grid-cols-4">
-          <TabsTrigger value="general">{t('generalSetting')}</TabsTrigger>
-          <TabsTrigger value="model">{t('llmModel')}</TabsTrigger>
-          <TabsTrigger value="params">{t('modelParams')}</TabsTrigger>
-          <TabsTrigger disabled={hiddenTalkPanel} value="voice">
+        <TabsList className="mx-auto grid h-fit w-full grid-cols-4">
+          <TabsTrigger className="text-wrap" value="general">
+            {t('generalSetting')}
+          </TabsTrigger>
+          <TabsTrigger className="text-wrap" value="model">
+            {t('llmModel')}
+          </TabsTrigger>
+          <TabsTrigger className="text-wrap" value="params">
+            {t('modelParams')}
+          </TabsTrigger>
+          <TabsTrigger className="text-wrap" disabled={hiddenTalkPanel} value="voice">
             {t('voiceServer')}
           </TabsTrigger>
         </TabsList>
@@ -182,7 +192,6 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
               <Input
                 id="password"
                 type="password"
-                disabled={!isProtected}
                 placeholder={t('accessPasswordPlaceholder')}
                 className="col-span-3"
                 defaultValue={password}
@@ -452,6 +461,13 @@ function Setting({ open, hiddenTalkPanel, onClose }: SettingProps) {
                   })}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="autoStopRecord" className="text-right">
+                {t('autoStopRecord')}
+              </Label>
+              <Switch checked={autoStopRecord} onCheckedChange={setAutoStopRecord} />
+              <span className="text-center">{autoStopRecord ? t('settingEnable') : t('settingDisable')}</span>
             </div>
           </div>
         </TabsContent>

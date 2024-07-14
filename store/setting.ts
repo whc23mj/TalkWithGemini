@@ -23,6 +23,7 @@ interface SettingStore extends Setting {
   setTemperature: (value: number) => void
   setMaxOutputTokens: (value: number) => void
   setSafety: (level: string) => void
+  setAutoStopRecord: (active: boolean) => void
 }
 
 const ASSISTANT_INDEX_URL = process.env.NEXT_PUBLIC_ASSISTANT_INDEX_URL
@@ -55,7 +56,8 @@ export const useSettingStore = create<SettingStore>((set) => ({
   topK: 64,
   temperature: 1,
   maxOutputTokens: 8192,
-  safety: 'low',
+  safety: 'none',
+  autoStopRecord: false,
   init: async (isProtected) => {
     await dataMigration()
     const sttLang = await storage.getItem<string>('sttLang')
@@ -85,7 +87,8 @@ export const useSettingStore = create<SettingStore>((set) => ({
       topK: (await storage.getItem<number>('topK')) ?? defaultModelConfig.topK,
       temperature: (await storage.getItem<number>('temperature')) ?? defaultModelConfig.temperature,
       maxOutputTokens: (await storage.getItem<number>('maxOutputTokens')) ?? defaultModelConfig.maxOutputTokens,
-      safety: (await storage.getItem<string>('safety')) || 'low',
+      safety: (await storage.getItem<string>('safety')) || 'none',
+      autoStopRecord: (await storage.getItem<boolean>('autoStopRecord')) || false,
     }
     set(() => state)
     return state
@@ -162,5 +165,9 @@ export const useSettingStore = create<SettingStore>((set) => ({
   setSafety: (level) => {
     set(() => ({ safety: level }))
     storage.setItem<string>('safety', level)
+  },
+  setAutoStopRecord: (active) => {
+    set(() => ({ autoStopRecord: active }))
+    storage.setItem<boolean>('autoStopRecord', active)
   },
 }))
